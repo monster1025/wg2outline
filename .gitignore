@@ -1,0 +1,5 @@
+.env
+wireguard-config
+wireguard-config/peer*
+wireguard-config/wg0.conf
+
