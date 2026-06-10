@@ -1,0 +1,82 @@
+#!/usr/bin/with-contenv bash
+set -eu
+
+if [ -z "${OUTLINE_TRANSPORT:-}" ]; then
+  echo "ERROR: OUTLINE_TRANSPORT is required (ss://...)" >&2
+  exit 1
+fi
+
+if [ -z "${INTERNAL_SUBNET:-}" ]; then
+  echo "ERROR: INTERNAL_SUBNET is required (e.g. 10.13.13.0)" >&2
+  exit 1
+fi
+
+WG_FWMARK=0x51820
+WG_SUBNET="${INTERNAL_SUBNET}/24"
+
+apply_bypass_rules() {
+  # WireGuard UDP replies go to the peer's public IP, not the WG subnet.
+  # Mark and bypass Outline policy routing for those packets.
+  ip rule add pref 50 fwmark "${WG_FWMARK}" lookup main 2>/dev/null || true
+
+  # Inner IP traffic to WG peers must use the main table (replies via wg0).
+  ip rule add pref 100 to "${WG_SUBNET}" lookup main 2>/dev/null || true
+
+  # Docker/custom bridge subnets differ per host (e.g. 172.17.0.0/16, 10.200.0.0/16).
+  local pref=101
+  local cidr
+  for cidr in $(ip -4 route show proto kernel scope link 2>/dev/null | awk '$2 == "dev" { print $1 }'); do
+    ip rule add pref "${pref}" to "${cidr}" lookup main 2>/dev/null || true
+    pref=$((pref + 1))
+  done
+}
+
+setup_wg_mangle() {
+  local wg_port="$1"
+  if iptables -t mangle -C OUTPUT -p udp --sport "${wg_port}" -j MARK --set-mark "${WG_FWMARK}" 2>/dev/null; then
+    return 0
+  fi
+  iptables -t mangle -A OUTPUT -p udp --sport "${wg_port}" -j MARK --set-mark "${WG_FWMARK}"
+}
+
+wait_for_outline_routing() {
+  local i
+  for i in $(seq 1 30); do
+    if ip link show outline233 >/dev/null 2>&1 && ip rule show | grep -q 'lookup 233'; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "WARN: Outline routing not ready after 30s, applying bypass rules anyway" >&2
+  return 1
+}
+
+/usr/local/bin/outline-cli -transport "${OUTLINE_TRANSPORT}" &
+OUTLINE_PID=$!
+
+wait_for_outline_routing || true
+apply_bypass_rules
+setup_wg_mangle "${SERVERPORT:-51820}"
+
+# wg0 starts after this service; refresh rules once the interface and listen port are known.
+(
+  for _ in $(seq 1 60); do
+    if ip link show wg0 >/dev/null 2>&1; then
+      wg_port="$(wg show wg0 listen-port 2>/dev/null || echo "${SERVERPORT:-51820}")"
+      setup_wg_mangle "${wg_port}"
+      apply_bypass_rules
+      break
+    fi
+    sleep 2
+  done
+) &
+
+# Ensure exactly one NAT rule for traffic leaving via Outline interface.
+if iptables -t nat -C POSTROUTING -o outline+ -j MASQUERADE 2>/dev/null; then
+  while iptables -t nat -C POSTROUTING -o outline+ -j MASQUERADE 2>/dev/null; do
+    iptables -t nat -D POSTROUTING -o outline+ -j MASQUERADE || true
+  done
+fi
+iptables -t nat -A POSTROUTING -o outline+ -j MASQUERADE
+
+wait "$OUTLINE_PID"

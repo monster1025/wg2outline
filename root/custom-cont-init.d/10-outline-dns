@@ -1,0 +1,6 @@
+#!/usr/bin/with-contenv bash
+
+# Some distros mount /etc/resolv.conf as a file from the host.
+# Ensure DNS works reliably inside the VPN network namespace.
+umount /etc/resolv.conf 2>/dev/null || true
+[ -f /etc/resolv.conf ] || printf 'nameserver 1.1.1.1\n' > /etc/resolv.conf
