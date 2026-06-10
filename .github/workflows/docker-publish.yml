@@ -43,7 +43,7 @@ jobs:
           if [ -n "${{ vars.DOCKERHUB_IMAGE }}" ]; then
             echo "name=${{ vars.DOCKERHUB_IMAGE }}" >> "$GITHUB_OUTPUT"
           else
-            echo "name=${{ secrets.DOCKERHUB_USERNAME }}/max2telegram" >> "$GITHUB_OUTPUT"
+            echo "name=${{ secrets.DOCKERHUB_USERNAME }}/wg2outline" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Docker Hub login
